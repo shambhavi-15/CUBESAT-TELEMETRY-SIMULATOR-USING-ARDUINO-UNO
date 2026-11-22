@@ -1,4 +1,4 @@
-// Link: transmitter D11 -> this board D10; connect grounds together.
+
 #include <SoftwareSerial.h>
 #include <LiquidCrystal.h>
 #include <stdlib.h>
