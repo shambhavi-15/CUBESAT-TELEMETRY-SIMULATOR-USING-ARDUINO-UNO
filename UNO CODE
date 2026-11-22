@@ -1,0 +1,184 @@
+// Link: transmitter D11 -> this board D10; connect grounds together.
+#include <SoftwareSerial.h>
+#include <LiquidCrystal.h>
+#include <stdlib.h>
+#include <string.h>
+
+
+SoftwareSerial link(10, 11);          // RX=D10, TX unused
+LiquidCrystal lcd(7, 6, 5, 4, 3, 2); // RS, E, D4, D5, D6, D7; LCD R/W is grounded
+uint32_t goodPackets = 0, badPackets = 0, lostPackets = 0;
+uint16_t previousSequence = 0;
+bool havePreviousSequence = false;
+unsigned long lastGoodPacketMs = 0;
+bool signalLostShown = false;
+char lineBuffer[80];
+uint8_t lineLength = 0;
+bool droppingLongLine = false;
+
+
+void lcdLine(uint8_t row, const char *text) {
+  lcd.setCursor(0, row);
+  for (uint8_t i = 0; i < 16; ++i) {
+    char c = text[i];
+    lcd.print(c ? c : ' ');
+  }
+}
+
+
+void countBad(const char *reason) {
+  ++badPackets;
+  Serial.print("BAD packet: ");
+  Serial.println(reason);
+}
+
+
+// Parse a non-negative decimal field into a fixed-point integer (e.g. "27.4" -> 274).
+bool parseFixed(const char *text, uint8_t decimalPlaces, uint32_t *result) {
+  if (!text || !*text || !result) return false;
+  uint32_t whole = 0, fraction = 0;
+  uint8_t seenDecimals = 0;
+  bool afterPoint = false, sawDigit = false;
+  for (const char *p = text; *p; ++p) {
+    if (*p == '.' && !afterPoint) { afterPoint = true; continue; }
+    if (*p < '0' || *p > '9') return false;
+    sawDigit = true;
+    uint8_t digit = (uint8_t)(*p - '0');
+    if (!afterPoint) {
+      if (whole > 1000000UL) return false;
+      whole = whole * 10UL + digit;
+    } else {
+      if (seenDecimals >= decimalPlaces) return false;
+      fraction = fraction * 10UL + digit;
+      ++seenDecimals;
+    }
+  }
+  if (!sawDigit) return false;
+  while (seenDecimals < decimalPlaces) { fraction *= 10UL; ++seenDecimals; }
+  uint32_t scale = decimalPlaces == 1 ? 10UL : 100UL;
+  *result = whole * scale + fraction;
+  return true;
+}
+
+
+void processLine(char *line) {
+  size_t n = strlen(line);
+  if (n && line[n - 1] == '\r') line[--n] = '\0';
+  if (n < 6 || line[0] != '$') { countBad("frame"); return; }
+
+
+  char *star = strchr(line, '*');
+  if (!star || strlen(star + 1) != 2) { countBad("checksum field"); return; }
+  char *hexEnd = NULL;
+  unsigned long receivedChecksum = strtoul(star + 1, &hexEnd, 16);
+  if (!hexEnd || *hexEnd != '\0' || receivedChecksum > 255) {
+    countBad("checksum format"); return;
+  }
+  *star = '\0';
+  char *payload = line + 1;
+  uint8_t checksum = 0;
+  for (const char *p = payload; *p; ++p) checksum ^= (uint8_t)*p;
+  if (checksum != (uint8_t)receivedChecksum) { countBad("checksum mismatch"); return; }
+
+
+  char *field1 = strchr(payload, ',');
+  if (!field1) { countBad("payload fields"); return; }
+  *field1++ = '\0';
+  char *field2 = strchr(field1, ',');
+  if (!field2) { countBad("payload fields"); return; }
+  *field2++ = '\0';
+  char *field3 = strchr(field2, ',');
+  if (!field3) { countBad("payload fields"); return; }
+  *field3++ = '\0';
+  if (strchr(field3, ',')) { countBad("extra payload field"); return; }
+
+
+  char *endPtr = NULL;
+  unsigned long sequence = strtoul(payload, &endPtr, 10);
+  if (!*payload || !endPtr || *endPtr || sequence > 65535UL) {
+    countBad("sequence"); return;
+  }
+  uint32_t temperatureTenths, batteryHundredths;
+  if (!parseFixed(field1, 1, &temperatureTenths) ||
+      !parseFixed(field2, 2, &batteryHundredths)) {
+    countBad("temperature/battery value"); return;
+  }
+  endPtr = NULL;
+  unsigned long uptimeSeconds = strtoul(field3, &endPtr, 10);
+  if (!*field3 || !endPtr || *endPtr) { countBad("uptime"); return; }
+  (void)uptimeSeconds; // retained in the packet for housekeeping/diagnostics
+
+
+  uint16_t currentSequence = (uint16_t)sequence;
+  if (havePreviousSequence) {
+    uint16_t gap = (uint16_t)(currentSequence - previousSequence); // wrap-safe
+    if (gap > 1 && gap < 32768) lostPackets += (uint16_t)(gap - 1);
+  }
+  previousSequence = currentSequence;
+  havePreviousSequence = true;
+  ++goodPackets;
+  lastGoodPacketMs = millis();
+  signalLostShown = false;
+
+
+  char tempText[8], batteryText[8], row0[17], row1[17];
+  snprintf(tempText, sizeof(tempText), "%lu.%lu",
+           (unsigned long)(temperatureTenths / 10),
+           (unsigned long)(temperatureTenths % 10));
+  snprintf(batteryText, sizeof(batteryText), "%lu.%02lu",
+           (unsigned long)(batteryHundredths / 100),
+           (unsigned long)(batteryHundredths % 100));
+  snprintf(row0, sizeof(row0), "T:%sC B:%s", tempText, batteryText);
+  snprintf(row1, sizeof(row1), "G%lu B%lu L%lu",
+           (unsigned long)goodPackets, (unsigned long)badPackets,
+           (unsigned long)lostPackets);
+  lcdLine(0, row0);
+  lcdLine(1, row1);
+
+
+  // Numeric CSV output for Arduino Serial Plotter, without float printf support.
+  Serial.print(temperatureTenths / 10); Serial.print('.');
+  Serial.print(temperatureTenths % 10); Serial.print(',');
+  Serial.print(batteryHundredths / 100); Serial.print('.');
+  if ((batteryHundredths % 100) < 10) Serial.print('0');
+  Serial.print(batteryHundredths % 100); Serial.print(',');
+  Serial.print(goodPackets); Serial.print(',');
+  Serial.print(badPackets); Serial.print(',');
+  Serial.println(lostPackets);
+}
+
+
+void setup() {
+  Serial.begin(9600);
+  link.begin(9600);
+  lcd.begin(16, 2);
+  lcdLine(0, "CubeSat Ground");
+  lcdLine(1, "Waiting packets");
+  Serial.println("tempC,batteryV,good,bad,lost");
+}
+
+
+void loop() {
+  while (link.available()) {
+    char c = (char)link.read();
+    if (c == '\n') {
+      if (droppingLongLine) countBad("oversize frame");
+      else {
+        lineBuffer[lineLength] = '\0';
+        processLine(lineBuffer);
+      }
+      lineLength = 0;
+      droppingLongLine = false;
+    } else if (!droppingLongLine) {
+      if (lineLength < sizeof(lineBuffer) - 1) lineBuffer[lineLength++] = c;
+      else droppingLongLine = true;
+    }
+  }
+  if (goodPackets > 0 && !signalLostShown &&
+      (unsigned long)(millis() - lastGoodPacketMs) > 6000UL) {
+    lcdLine(1, "** SIGNAL LOST **");
+    signalLostShown = true;
+  }
+}
+
+
