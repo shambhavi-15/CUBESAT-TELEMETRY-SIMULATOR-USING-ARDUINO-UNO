@@ -1,5 +1,6 @@
 # CUBESAT-TELEMETRY-SIMULATOR-USING-ARDUINO-UNO
 Arduino-only CubeSat telemetry simulator. A satellite Arduino reads an LM35 temperature sensor and sends checksummed packets to a ground-station Arduino, which verifies them and shows live temperature, packet count and errors on a 16x2 LCD. Includes signal-loss alert. No Python or LoRa needed.
+
 A low-cost simulation of a CubeSat telemetry downlink built with two Arduino boards. The "satellite" Arduino measures temperature with an LM35 sensor and transmits it as a checksummed data packet every second. The "ground station" Arduino receives the packet, verifies its integrity, and displays the live telemetry on a 16x2 LCD.
 
 The project demonstrates the core ideas of satellite telemetry: onboard sensing, packet formatting, data transmission, error detection, and ground-station monitoring. It uses no Python and no radio module; a wired serial link stands in for the radio link.
